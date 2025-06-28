@@ -26,3 +26,21 @@ tidy:
 lint:
     @echo "Linting code..."
     @golangci-lint run ./...
+
+# Vet the codebase
+vet:
+    @echo "Checking packages..."
+    @go vet ./...
+
+# Test the codebase
+test:
+    @echo "Testing code..."
+    @go test ./...
+
+# Run all checkers and build
+dev: lint fmt vet test build
+
+# Clean binaries
+clean:
+    @echo "Cleaning..."
+    rm -f tunecli

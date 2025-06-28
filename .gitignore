@@ -1,0 +1,7 @@
+# Compiled binary
+tunecli
+
+!*/
+
+# OS-specific files
+.DS_Store

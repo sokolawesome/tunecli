@@ -1,0 +1,28 @@
+version: "2"
+
+run:
+    concurrency: 4
+    issues-exit-code: 1
+    tests: true
+
+linters:
+    enable:
+        - govet
+        - errcheck
+        - staticcheck
+        - unused
+        - ineffassign
+        - misspell
+    settings:
+        errcheck:
+            check-type-assertions: true
+            check-blank: true
+        misspell:
+            locale: US
+
+formatters:
+    enable:
+        - gofmt
+    settings:
+        gofmt:
+            simplify: true

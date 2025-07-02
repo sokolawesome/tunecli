@@ -13,41 +13,30 @@ import (
 )
 
 func main() {
-	log.Println("Loading configurations...")
-	cfg, err := config.LoadConfigs()
+	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("error loading config: %v\n", err)
+		log.Fatalf("config error: %v", err)
 	}
 
-	log.Println("Starting media player...")
-	p, err := player.NewPlayer()
+	p, err := player.New()
 	if err != nil {
-		log.Fatalf("error starting player: %v\n", err)
+		log.Fatalf("player error: %v", err)
 	}
-	defer func() {
-		log.Println("Shutting down player...")
-		if err := p.Shutdown(); err != nil {
-			log.Printf("error during player shutdown: %v", err)
-		}
-	}()
+	defer p.Shutdown()
 
-	log.Println("Starting MPRIS integration...")
 	mprisServer, err := mpris.NewServer(p)
 	if err != nil {
-		log.Printf("failed to start MPRIS server: %v\n", err)
+		log.Printf("MPRIS failed: %v", err)
 	}
 	if mprisServer != nil {
-		log.Println("MPRIS server started successfully.")
 		defer mprisServer.Shutdown()
 	}
 
-	model := ui.NewModel(p, cfg)
+	model := ui.New(p, cfg)
 	program := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := program.Run(); err != nil {
-		fmt.Printf("error: %v", err)
+		fmt.Printf("Error: %v", err)
 		os.Exit(1)
 	}
-
-	log.Println("Application exiting.")
 }

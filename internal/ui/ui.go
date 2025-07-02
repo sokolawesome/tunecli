@@ -1,7 +1,7 @@
 package ui
 
 import (
-	"log"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,9 +14,7 @@ import (
 	"github.com/sokolawesome/tunecli/internal/player"
 )
 
-type playerStateMsg player.State
-
-type LogMsg string
+type stateMsg player.State
 
 type viewMode int
 
@@ -25,96 +23,94 @@ const (
 	localFilesView
 )
 
-var audioExtensions = map[string]struct{}{
-	".mp3":  {},
-	".flac": {},
-	".ogg":  {},
-	".wav":  {},
-	".m4a":  {},
+var audioExts = map[string]bool{
+	".mp3": true, ".flac": true, ".ogg": true,
+	".wav": true, ".m4a": true,
 }
 
-type model struct {
-	player                             *player.Player
-	stations                           []config.RadioStation
-	playerState                        player.State
-	logView                            viewport.Model
-	mode                               viewMode
-	logMessages, musicDirs, localFiles []string
-	localFilesErr                      error
-	keys                               KeyMap
-	ready                              bool
-	width, height, cursor              int
+type Model struct {
+	player      *player.Player
+	stations    []config.RadioStation
+	localFiles  []string
+	musicDirs   []string
+	playerState player.State
+	logView     viewport.Model
+	logs        []string
+	mode        viewMode
+	cursor      int
+	width       int
+	height      int
+	ready       bool
+	keys        keyMap
 }
 
-type KeyMap struct {
+type keyMap struct {
 	Up, Down, Quit, Play, Pause, SwitchView key.Binding
 }
 
-func DefaultKeyMap() KeyMap {
-	return KeyMap{
-		Up:         key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("↑/k", "move up")),
-		Down:       key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("↓/j", "move down")),
-		Quit:       key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
-		Play:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "play selected")),
-		Pause:      key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "pause/resume")),
-		SwitchView: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "switch view")),
+func (k keyMap) ShortHelp() []key.Help {
+	return []key.Help{
+		{Key: "↑/↓", Desc: "navigate"},
+		{Key: "enter", Desc: "play"},
+		{Key: "space", Desc: "pause"},
+		{Key: "tab", Desc: "switch"},
+		{Key: "q", Desc: "quit"},
 	}
 }
 
-func NewModel(p *player.Player, cfg *config.AppConfig) model {
-	m := model{
+func (k keyMap) FullHelp() [][]key.Help {
+	return [][]key.Help{k.ShortHelp()}
+}
+
+func defaultKeys() keyMap {
+	return keyMap{
+		Up:         key.NewBinding(key.WithKeys("k", "up")),
+		Down:       key.NewBinding(key.WithKeys("j", "down")),
+		Quit:       key.NewBinding(key.WithKeys("q", "ctrl+c")),
+		Play:       key.NewBinding(key.WithKeys("enter")),
+		Pause:      key.NewBinding(key.WithKeys("space")),
+		SwitchView: key.NewBinding(key.WithKeys("tab")),
+	}
+}
+
+func New(p *player.Player, cfg *config.Config) Model {
+	m := Model{
 		player:    p,
 		stations:  cfg.Stations,
-		keys:      DefaultKeyMap(),
-		musicDirs: cfg.General.MusicDirs,
+		musicDirs: cfg.MusicDirs,
+		keys:      defaultKeys(),
 	}
-
 	m.scanLocalFiles()
 	return m
 }
 
-func (m *model) scanLocalFiles() {
+func (m *Model) scanLocalFiles() {
 	m.localFiles = []string{}
 	for _, dir := range m.musicDirs {
-		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
+		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return nil
 			}
-			if !info.IsDir() {
-				if _, ok := audioExtensions[filepath.Ext(path)]; ok {
-					m.localFiles = append(m.localFiles, path)
-				}
+			if audioExts[strings.ToLower(filepath.Ext(path))] {
+				m.localFiles = append(m.localFiles, path)
 			}
 			return nil
 		})
-		if err != nil {
-			m.localFilesErr = err
-			log.Printf("Error scanning local files in %s: %v", dir, err)
-			return
-		}
-	}
-	log.Printf("Found %d local audio files.", len(m.localFiles))
-}
-
-func waitForPlayerChanges(ch chan player.State) tea.Cmd {
-	return func() tea.Msg {
-		return playerStateMsg(<-ch)
 	}
 }
 
-func (m model) Init() tea.Cmd {
-	return waitForPlayerChanges(m.player.StateChanges)
+func (m Model) Init() tea.Cmd {
+	return waitForState(m.player.StateChanges)
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		listHeight := m.height - 10
-		m.logView = viewport.New(m.width, m.height-listHeight-2)
-		m.logView.SetContent(strings.Join(m.logMessages, "\n"))
+		m.logView = viewport.New(m.width, m.height/3)
+		m.logView.SetContent(strings.Join(m.logs, "\n"))
 		m.ready = true
 
 	case tea.KeyMsg:
@@ -129,39 +125,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor--
 			}
 		case key.Matches(msg, m.keys.Down):
-			var limit int
-			if m.mode == radioView {
-				limit = len(m.stations) - 1
-			} else {
-				limit = len(m.localFiles) - 1
-			}
+			limit := m.getItemCount() - 1
 			if m.cursor < limit {
 				m.cursor++
 			}
 		case key.Matches(msg, m.keys.Play):
-			var path string
-			if m.mode == radioView && len(m.stations) > m.cursor {
-				path = m.stations[m.cursor].URL
-			} else if m.mode == localFilesView && len(m.localFiles) > m.cursor {
-				path = m.localFiles[m.cursor]
-			}
-			if path != "" {
-				if err := m.player.LoadFile(path, "replace"); err != nil {
-					log.Printf("Error playing item: %v", err)
-				}
-			}
+			m.playSelected()
+		case key.Matches(msg, m.keys.Pause):
+			m.player.TogglePause()
 		}
 
-	case playerStateMsg:
+	case stateMsg:
 		m.playerState = player.State(msg)
-		cmds = append(cmds, waitForPlayerChanges(m.player.StateChanges))
-
-	case LogMsg:
-		m.logMessages = append(m.logMessages, string(msg))
-		if m.ready {
-			m.logView.SetContent(strings.Join(m.logMessages, "\n"))
-			m.logView.GotoBottom()
-		}
+		cmds = append(cmds, waitForState(m.player.StateChanges))
 	}
 
 	if m.ready {
@@ -173,66 +149,130 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m model) View() string {
+func (m *Model) getItemCount() int {
+	if m.mode == radioView {
+		return len(m.stations)
+	}
+	return len(m.localFiles)
+}
+
+func (m *Model) playSelected() {
+	var path string
+	switch m.mode {
+	case radioView:
+		if m.cursor < len(m.stations) {
+			path = m.stations[m.cursor].URL
+		}
+	case localFilesView:
+		if m.cursor < len(m.localFiles) {
+			path = m.localFiles[m.cursor]
+		}
+	}
+	if path != "" {
+		m.player.LoadFile(path, "replace")
+	}
+}
+
+func (m Model) View() string {
 	if !m.ready {
 		return "Initializing..."
 	}
 
-	var mainContent string
+	header := m.renderHeader()
+	content := m.renderContent()
+	status := m.renderStatus()
+	help := m.renderHelp()
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		header, content, status, help, m.logView.View())
+}
+
+func (m Model) renderHeader() string {
+	title := "TuneCLI"
 	if m.mode == radioView {
-		mainContent = m.renderRadioView()
+		title += " - Radio Stations"
 	} else {
-		mainContent = m.renderLocalFilesView()
+		title += " - Local Files"
 	}
-
-	help := "Controls: ↑/↓ navigate | Enter play | Tab switch view | q quit"
-	logHeader := lipgloss.NewStyle().BorderStyle(lipgloss.NormalBorder()).BorderTop(true).Width(m.width).Render("Logs")
-
-	return lipgloss.JoinVertical(lipgloss.Left, mainContent, help, logHeader, m.logView.View())
+	return lipgloss.NewStyle().Bold(true).Render(title) + "\n"
 }
 
-func (m model) renderRadioView() string {
-	var b strings.Builder
-	b.WriteString("TuneCLI - Radio Stations\n\n")
-	for i, station := range m.stations {
-		b.WriteString(renderLine(station.Name, i == m.cursor, m.playerState.IsPlaying && m.playerState.Title == station.Name))
+func (m Model) renderContent() string {
+	var items []string
+
+	switch m.mode {
+	case radioView:
+		for i, station := range m.stations {
+			items = append(items, m.renderItem(station.Name, i))
+		}
+	case localFilesView:
+		start, end := m.getVisibleRange()
+		for i := start; i < end; i++ {
+			name := filepath.Base(m.localFiles[i])
+			items = append(items, m.renderItem(name, i))
+		}
 	}
-	return b.String()
+
+	if len(items) == 0 {
+		return "No items found.\n"
+	}
+
+	return strings.Join(items, "")
 }
 
-func (m model) renderLocalFilesView() string {
-	var b strings.Builder
-	b.WriteString("TuneCLI - Local Files\n\n")
-	if m.localFilesErr != nil {
-		b.WriteString("Error reading files. Check logs.")
-	} else if len(m.localFiles) == 0 {
-		b.WriteString("No local files found in configured directories.")
-	} else {
-		start := m.cursor - 10
+func (m Model) getVisibleRange() (int, int) {
+	const visibleItems = 20
+	start := m.cursor - visibleItems/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + visibleItems
+	if end > len(m.localFiles) {
+		end = len(m.localFiles)
+		start = end - visibleItems
 		if start < 0 {
 			start = 0
 		}
-		end := start + 20
-		if end > len(m.localFiles) {
-			end = len(m.localFiles)
-		}
-
-		for i := start; i < end; i++ {
-			b.WriteString(renderLine(filepath.Base(m.localFiles[i]), i == m.cursor, m.playerState.IsPlaying && m.playerState.Title == filepath.Base(m.localFiles[i])))
-		}
 	}
-
-	return b.String()
+	return start, end
 }
 
-func renderLine(text string, isCursor bool, isPlaying bool) string {
+func (m Model) renderItem(name string, index int) string {
 	cursor := "  "
-	if isCursor {
+	if index == m.cursor {
 		cursor = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("▶ ")
 	}
-	if isPlaying {
-		text += lipgloss.NewStyle().Foreground(lipgloss.Color("70")).Render(" [Playing]")
+
+	style := lipgloss.NewStyle()
+	if m.playerState.IsPlaying && strings.Contains(m.playerState.Title, name) {
+		style = style.Foreground(lipgloss.Color("70"))
+		name += " [Playing]"
 	}
 
-	return cursor + text + "\n"
+	return cursor + style.Render(name) + "\n"
+}
+
+func (m Model) renderStatus() string {
+	if m.playerState.Title == "" {
+		return "\nStatus: Stopped\n"
+	}
+
+	status := "Paused"
+	if m.playerState.IsPlaying {
+		status = "Playing"
+	}
+
+	return fmt.Sprintf("\nNow %s: %s | Volume: %d%%\n",
+		status, m.playerState.Title, m.playerState.Volume)
+}
+
+func (m Model) renderHelp() string {
+	help := "Controls: ↑/↓ navigate | Enter play | Space pause/resume | Tab switch view | q quit"
+	return lipgloss.NewStyle().Faint(true).Render(help) + "\n"
+}
+
+func waitForState(ch chan player.State) tea.Cmd {
+	return func() tea.Msg {
+		return stateMsg(<-ch)
+	}
 }

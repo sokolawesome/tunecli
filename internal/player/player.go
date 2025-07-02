@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -29,7 +28,7 @@ type State struct {
 	Duration  float64
 }
 
-type MpvEvent struct {
+type mpvEvent struct {
 	Event string `json:"event"`
 	Name  string `json:"name"`
 	Data  any    `json:"data"`
@@ -39,26 +38,25 @@ type Player struct {
 	cmd          *exec.Cmd
 	StateChanges chan State
 	mu           sync.RWMutex
-	currentState State
+	state        State
 	ctx          context.Context
 	cancel       context.CancelFunc
-	started      bool
 	wg           sync.WaitGroup
 }
 
-func NewPlayer() (*Player, error) {
+func New() (*Player, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	p := &Player{
 		StateChanges: make(chan State, 10),
 		ctx:          ctx,
 		cancel:       cancel,
-		currentState: State{Volume: 100},
+		state:        State{Volume: 100},
 	}
 
 	if err := p.start(); err != nil {
 		cancel()
-		return nil, fmt.Errorf("failed to start player: %w", err)
+		return nil, err
 	}
 
 	return p, nil
@@ -66,36 +64,33 @@ func NewPlayer() (*Player, error) {
 
 func (p *Player) start() error {
 	if err := p.cleanupSocket(); err != nil {
-		return fmt.Errorf("failed to cleanup socket: %w", err)
+		return fmt.Errorf("cleanup socket: %w", err)
 	}
 
-	cmd := exec.CommandContext(p.ctx, "mpv",
+	p.cmd = exec.CommandContext(p.ctx, "mpv",
 		"--idle",
 		"--input-ipc-server="+socketPath,
 		"--no-video",
 		"--no-terminal",
 	)
 
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := p.cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("could not get stdout pipe from mpv: %w", err)
+		return fmt.Errorf("stdout pipe: %w", err)
 	}
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("could not start mpv: %w", err)
+	if err := p.cmd.Start(); err != nil {
+		return fmt.Errorf("start mpv: %w", err)
 	}
-
-	p.cmd = cmd
-	p.started = true
 
 	if err := p.waitForSocket(); err != nil {
-		p.killProcess()
-		return fmt.Errorf("mpv socket not ready: %w", err)
+		p.kill()
+		return fmt.Errorf("socket timeout: %w", err)
 	}
 
-	if err := p.setupPropertyObservation(); err != nil {
-		p.killProcess()
-		return fmt.Errorf("could not setup property observation: %w", err)
+	if err := p.setupObservers(); err != nil {
+		p.kill()
+		return fmt.Errorf("setup observers: %w", err)
 	}
 
 	p.wg.Add(1)
@@ -106,7 +101,7 @@ func (p *Player) start() error {
 
 func (p *Player) cleanupSocket() error {
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("could not remove old socket file: %w", err)
+		return err
 	}
 	return nil
 }
@@ -119,9 +114,10 @@ func (p *Player) waitForSocket() error {
 	for {
 		select {
 		case <-timeout:
-			return fmt.Errorf("timeout waiting for mpv socket")
+			return fmt.Errorf("timeout")
 		case <-ticker.C:
-			if _, err := net.Dial("unix", socketPath); err == nil {
+			if conn, err := net.Dial("unix", socketPath); err == nil {
+				conn.Close()
 				return nil
 			}
 		case <-p.ctx.Done():
@@ -130,15 +126,13 @@ func (p *Player) waitForSocket() error {
 	}
 }
 
-func (p *Player) setupPropertyObservation() error {
+func (p *Player) setupObservers() error {
 	properties := []string{"pause", "media-title", "volume", "time-pos", "duration"}
-
 	for i, prop := range properties {
 		if err := p.sendCommand([]any{"observe_property", i + 1, prop}); err != nil {
-			return fmt.Errorf("failed to observe property %s: %w", prop, err)
+			return fmt.Errorf("observe %s: %w", prop, err)
 		}
 	}
-
 	return nil
 }
 
@@ -152,59 +146,26 @@ func (p *Player) eventLoop(stdout io.ReadCloser) {
 		case <-p.ctx.Done():
 			return
 		default:
-			line := scanner.Text()
-			if err := p.processEvent(line); err != nil {
-				continue
-			}
+			p.processEvent(scanner.Text())
 		}
 	}
 }
 
-func (p *Player) processEvent(line string) error {
-	var event MpvEvent
+func (p *Player) processEvent(line string) {
+	var event mpvEvent
 	if err := json.Unmarshal([]byte(line), &event); err != nil {
-		return err
+		return
 	}
 
 	if event.Event != "property-change" {
-		return nil
+		return
 	}
 
 	p.mu.Lock()
-	updated := false
-
-	switch event.Name {
-	case "pause":
-		if paused, ok := event.Data.(bool); ok {
-			p.currentState.IsPlaying = !paused
-			updated = true
-		}
-	case "media-title":
-		if title, ok := event.Data.(string); ok {
-			p.currentState.Title = filepath.Base(title)
-			updated = true
-		}
-	case "volume":
-		if volume, ok := event.Data.(float64); ok {
-			p.currentState.Volume = int(volume)
-			updated = true
-		}
-	case "time-pos":
-		if pos, ok := event.Data.(float64); ok {
-			p.currentState.Position = pos
-			updated = true
-		}
-	case "duration":
-		if dur, ok := event.Data.(float64); ok {
-			p.currentState.Duration = dur
-			updated = true
-		}
-	}
-
+	updated := p.updateState(event.Name, event.Data)
 	if updated {
-		state := p.currentState
+		state := p.state
 		p.mu.Unlock()
-
 		select {
 		case p.StateChanges <- state:
 		case <-p.ctx.Done():
@@ -213,85 +174,50 @@ func (p *Player) processEvent(line string) error {
 	} else {
 		p.mu.Unlock()
 	}
+}
 
-	return nil
+func (p *Player) updateState(name string, data any) bool {
+	switch name {
+	case "pause":
+		if paused, ok := data.(bool); ok {
+			p.state.IsPlaying = !paused
+			return true
+		}
+	case "media-title":
+		if title, ok := data.(string); ok {
+			p.state.Title = strings.TrimSpace(title)
+			return true
+		}
+	case "volume":
+		if volume, ok := data.(float64); ok {
+			p.state.Volume = int(volume)
+			return true
+		}
+	case "time-pos":
+		if pos, ok := data.(float64); ok {
+			p.state.Position = pos
+			return true
+		}
+	case "duration":
+		if dur, ok := data.(float64); ok {
+			p.state.Duration = dur
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Player) GetState() State {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.currentState
+	return p.state
 }
 
-func isYoutubeURL(path string) bool {
-	return strings.Contains(path, "youtube.com") || strings.Contains(path, "youtu.be")
-}
-
-func getStreamURLFromYoutube(url string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "yt-dlp", "-f", "ba", "-g", url)
-	output, err := cmd.Output()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("yt-dlp failed: %s", string(exitErr.Stderr))
-		}
-		return "", fmt.Errorf("failed to run yt-dlp: %w", err)
-	}
-
-	streamURL := strings.TrimSpace(string(output))
-	if streamURL == "" {
-		return "", fmt.Errorf("yt-dlp returned empty stream URL")
-	}
-
-	return streamURL, nil
-}
-
-func (p *Player) LoadFile(path string, mode string) error {
-	if !p.started {
-		return fmt.Errorf("player not started")
-	}
-
+func (p *Player) LoadFile(path, mode string) error {
 	if strings.TrimSpace(path) == "" {
-		return fmt.Errorf("path cannot be empty")
+		return fmt.Errorf("empty path")
 	}
-
-	if isYoutubeURL(path) {
-		streamURL, err := getStreamURLFromYoutube(path)
-		if err != nil {
-			return fmt.Errorf("could not process youtube url: %w", err)
-		}
-		path = streamURL
-	}
-
 	return p.sendCommand([]any{"loadfile", path, mode})
-}
-
-func (p *Player) sendCommand(command []any) error {
-	if !p.started {
-		return fmt.Errorf("player not started")
-	}
-
-	ctx, cancel := context.WithTimeout(p.ctx, commandTimeout)
-	defer cancel()
-
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
-	if err != nil {
-		return fmt.Errorf("could not connect to mpv socket: %w", err)
-	}
-	defer conn.Close()
-
-	cmdBytes, err := json.Marshal(map[string]any{"command": command})
-	if err != nil {
-		return fmt.Errorf("could not marshal command: %w", err)
-	}
-
-	if _, err := conn.Write(append(cmdBytes, '\n')); err != nil {
-		return fmt.Errorf("could not write command: %w", err)
-	}
-
-	return nil
 }
 
 func (p *Player) TogglePause() error {
@@ -304,7 +230,7 @@ func (p *Player) Stop() error {
 
 func (p *Player) SetVolume(volume int) error {
 	if volume < 0 || volume > 100 {
-		return fmt.Errorf("volume must be between 0 and 100")
+		return fmt.Errorf("volume must be 0-100")
 	}
 	return p.sendCommand([]any{"set_property", "volume", volume})
 }
@@ -313,31 +239,49 @@ func (p *Player) Seek(seconds float64) error {
 	return p.sendCommand([]any{"seek", seconds})
 }
 
-func (p *Player) killProcess() {
+func (p *Player) sendCommand(command []any) error {
+	ctx, cancel := context.WithTimeout(p.ctx, commandTimeout)
+	defer cancel()
+
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer conn.Close()
+
+	cmdBytes, err := json.Marshal(map[string]any{"command": command})
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+
+	if _, err := conn.Write(append(cmdBytes, '\n')); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
+
+	return nil
+}
+
+func (p *Player) kill() {
 	if p.cmd != nil && p.cmd.Process != nil {
 		p.cmd.Process.Kill()
 	}
 }
 
 func (p *Player) Shutdown() error {
-	if !p.started {
-		return nil
-	}
-
 	p.cancel()
 
-	gracefulShutdown := make(chan error, 1)
+	done := make(chan error, 1)
 	go func() {
-		gracefulShutdown <- p.sendCommand([]any{"quit"})
+		done <- p.sendCommand([]any{"quit"})
 	}()
 
 	select {
-	case err := <-gracefulShutdown:
+	case err := <-done:
 		if err != nil {
-			p.killProcess()
+			p.kill()
 		}
 	case <-time.After(2 * time.Second):
-		p.killProcess()
+		p.kill()
 	}
 
 	p.wg.Wait()

@@ -24,7 +24,6 @@ type State struct {
 	IsPlaying bool
 	Title     string
 	Volume    int
-	Position  float64
 	Duration  float64
 }
 
@@ -157,12 +156,23 @@ func (p *Player) processEvent(line string) {
 		return
 	}
 
-	if event.Event != "property-change" {
-		return
+	p.mu.Lock()
+	var updated bool
+
+	switch event.Event {
+	case "property-change":
+		updated = p.updateState(event.Name, event.Data)
+	case "playback-restart":
+		p.state.IsPlaying = true
+		updated = true
+	case "idle":
+		p.state.IsPlaying = false
+		updated = true
+	case "end-file":
+		p.state.IsPlaying = false
+		updated = true
 	}
 
-	p.mu.Lock()
-	updated := p.updateState(event.Name, event.Data)
 	if updated {
 		state := p.state
 		p.mu.Unlock()
@@ -193,11 +203,6 @@ func (p *Player) updateState(name string, data any) bool {
 			p.state.Volume = int(volume)
 			return true
 		}
-	case "time-pos":
-		if pos, ok := data.(float64); ok {
-			p.state.Position = pos
-			return true
-		}
 	case "duration":
 		if dur, ok := data.(float64); ok {
 			p.state.Duration = dur
@@ -217,15 +222,63 @@ func (p *Player) LoadFile(path, mode string) error {
 	if strings.TrimSpace(path) == "" {
 		return fmt.Errorf("empty path")
 	}
-	return p.sendCommand([]any{"loadfile", path, mode})
+
+	if err := p.sendCommand([]any{"loadfile", path, mode}); err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	p.state.IsPlaying = true
+	state := p.state
+	p.mu.Unlock()
+
+	select {
+	case p.StateChanges <- state:
+	case <-p.ctx.Done():
+	default:
+	}
+
+	return nil
 }
 
 func (p *Player) TogglePause() error {
-	return p.sendCommand([]any{"cycle", "pause"})
+	if err := p.sendCommand([]any{"cycle", "pause"}); err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	p.state.IsPlaying = !p.state.IsPlaying
+	state := p.state
+	p.mu.Unlock()
+
+	select {
+	case p.StateChanges <- state:
+	case <-p.ctx.Done():
+	default:
+	}
+
+	return nil
 }
 
 func (p *Player) Stop() error {
-	return p.sendCommand([]any{"stop"})
+	if err := p.sendCommand([]any{"stop"}); err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	p.state.IsPlaying = false
+	p.state.Title = ""
+	p.state.Duration = 0
+	state := p.state
+	p.mu.Unlock()
+
+	select {
+	case p.StateChanges <- state:
+	case <-p.ctx.Done():
+	default:
+	}
+
+	return nil
 }
 
 func (p *Player) SetVolume(volume int) error {

@@ -188,11 +188,6 @@ func (s *Server) updateMPRISState(state player.State) {
 	if err := s.props.Set(interfaceName, "Volume", dbus.MakeVariant(volume)); err != nil {
 		log.Printf("MPRIS: failed to set Volume: %v", err)
 	}
-
-	position := int64(state.Position * 1000000)
-	if err := s.props.Set(interfaceName, "Position", dbus.MakeVariant(position)); err != nil {
-		log.Printf("MPRIS: failed to set Position: %v", err)
-	}
 }
 
 func (s *Server) PlayPause() *dbus.Error {

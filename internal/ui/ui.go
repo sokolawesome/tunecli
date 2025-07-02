@@ -244,9 +244,26 @@ func (m Model) renderItem(name string, index int) string {
 	}
 
 	style := lipgloss.NewStyle()
-	if m.playerState.IsPlaying && strings.Contains(m.playerState.Title, name) {
+
+	isCurrentlyPlaying := false
+	if m.playerState.IsPlaying && m.playerState.Title != "" {
+		switch m.mode {
+		case radioView:
+			if index < len(m.stations) {
+				isCurrentlyPlaying = strings.Contains(m.playerState.Title, m.stations[index].Name) ||
+					strings.Contains(m.stations[index].URL, m.playerState.Title)
+			}
+		case localFilesView:
+			if index < len(m.localFiles) {
+				isCurrentlyPlaying = strings.Contains(m.playerState.Title, filepath.Base(m.localFiles[index])) ||
+					strings.Contains(m.localFiles[index], m.playerState.Title)
+			}
+		}
+	}
+
+	if isCurrentlyPlaying {
 		style = style.Foreground(lipgloss.Color("70"))
-		name += " [Playing]"
+		name += " [♪ Playing]"
 	}
 
 	return cursor + style.Render(name) + "\n"
@@ -258,12 +275,19 @@ func (m Model) renderStatus() string {
 	}
 
 	status := "Paused"
+	statusColor := lipgloss.Color("208")
 	if m.playerState.IsPlaying {
 		status = "Playing"
+		statusColor = lipgloss.Color("70")
 	}
 
-	return fmt.Sprintf("\nNow %s: %s | Volume: %d%%\n",
-		status, m.playerState.Title, m.playerState.Volume)
+	statusStyle := lipgloss.NewStyle().Foreground(statusColor).Bold(true)
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
+
+	return fmt.Sprintf("\n%s: %s | Volume: %d%%\n",
+		statusStyle.Render(status),
+		titleStyle.Render(m.playerState.Title),
+		m.playerState.Volume)
 }
 
 func (m Model) renderHelp() string {

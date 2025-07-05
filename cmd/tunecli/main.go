@@ -4,39 +4,49 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sokolawesome/tunecli/internal/config"
-	"github.com/sokolawesome/tunecli/internal/integration/mpris"
 	"github.com/sokolawesome/tunecli/internal/player"
 	"github.com/sokolawesome/tunecli/internal/ui"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatalf("Error: %v", err)
+	}
+}
+
+func run() error {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("config error: %v", err)
+		return fmt.Errorf("load config: %w", err)
 	}
 
-	p, err := player.New()
+	p, err := player.New(cfg.Player.SocketPath)
 	if err != nil {
-		log.Fatalf("player error: %v", err)
+		return fmt.Errorf("create player: %w", err)
 	}
 	defer p.Shutdown()
 
-	mprisServer, err := mpris.NewServer(p)
-	if err != nil {
-		log.Printf("MPRIS failed: %v", err)
-	}
-	if mprisServer != nil {
-		defer mprisServer.Shutdown()
+	if err := p.SetVolume(cfg.Player.Volume); err != nil {
+		log.Printf("Warning: failed to set initial volume: %v", err)
 	}
 
-	model := ui.New(p, cfg)
-	program := tea.NewProgram(model, tea.WithAltScreen())
+	app := ui.New(cfg, p)
 
-	if _, err := program.Run(); err != nil {
-		fmt.Printf("Error: %v", err)
-		os.Exit(1)
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+		app.Stop()
+	}()
+
+	if err := app.Run(); err != nil {
+		return fmt.Errorf("run UI: %w", err)
 	}
+
+	return nil
 }

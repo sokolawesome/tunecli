@@ -2,301 +2,280 @@ package ui
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
 	"github.com/sokolawesome/tunecli/internal/config"
 	"github.com/sokolawesome/tunecli/internal/player"
+	"github.com/sokolawesome/tunecli/internal/scanner"
 )
 
-type stateMsg player.State
+type UI struct {
+	app         *tview.Application
+	config      *config.Config
+	player      *player.Player
+	musicFiles  []scanner.MusicFile
+	currentView ViewType
 
-type viewMode int
+	layout      *tview.Flex
+	stationList *tview.List
+	fileList    *tview.List
+	statusBar   *tview.TextView
+	controlBar  *tview.TextView
+
+	stateChannel <-chan player.State
+}
+
+type ViewType int
 
 const (
-	radioView viewMode = iota
-	localFilesView
+	StationView ViewType = iota
+	FileView
 )
 
-var audioExts = map[string]bool{
-	".mp3": true, ".flac": true, ".ogg": true,
-	".wav": true, ".m4a": true,
-}
-
-type Model struct {
-	player      *player.Player
-	stations    []config.RadioStation
-	localFiles  []string
-	musicDirs   []string
-	playerState player.State
-	logView     viewport.Model
-	logs        []string
-	mode        viewMode
-	cursor      int
-	width       int
-	height      int
-	ready       bool
-	keys        keyMap
-}
-
-type keyMap struct {
-	Up, Down, Quit, Play, Pause, SwitchView key.Binding
-}
-
-func (k keyMap) ShortHelp() []key.Help {
-	return []key.Help{
-		{Key: "↑/↓", Desc: "navigate"},
-		{Key: "enter", Desc: "play"},
-		{Key: "space", Desc: "pause"},
-		{Key: "tab", Desc: "switch"},
-		{Key: "q", Desc: "quit"},
+func New(cfg *config.Config, p *player.Player) *UI {
+	ui := &UI{
+		app:          tview.NewApplication(),
+		config:       cfg,
+		player:       p,
+		currentView:  StationView,
+		stateChannel: p.Subscribe(),
 	}
+
+	ui.setupUI()
+	ui.setupKeybinds()
+	ui.scanMusicFiles()
+
+	go ui.handleStateUpdates()
+
+	return ui
 }
 
-func (k keyMap) FullHelp() [][]key.Help {
-	return [][]key.Help{k.ShortHelp()}
+func (ui *UI) setupUI() {
+	ui.stationList = tview.NewList().
+		SetHighlightFullLine(true).
+		SetSelectedTextColor(tcell.ColorBlack).
+		SetSelectedBackgroundColor(tcell.ColorWhite)
+
+	ui.fileList = tview.NewList().
+		SetHighlightFullLine(true).
+		SetSelectedTextColor(tcell.ColorBlack).
+		SetSelectedBackgroundColor(tcell.ColorWhite)
+
+	ui.statusBar = tview.NewTextView().
+		SetDynamicColors(true).
+		SetRegions(true)
+
+	ui.controlBar = tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignCenter)
+
+	ui.populateStations()
+	ui.updateStatusBar()
+	ui.updateControlBar()
+
+	ui.layout = tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(ui.getCurrentList(), 0, 1, true).
+		AddItem(ui.statusBar, 3, 0, false).
+		AddItem(ui.controlBar, 1, 0, false)
 }
 
-func defaultKeys() keyMap {
-	return keyMap{
-		Up:         key.NewBinding(key.WithKeys("k", "up")),
-		Down:       key.NewBinding(key.WithKeys("j", "down")),
-		Quit:       key.NewBinding(key.WithKeys("q", "ctrl+c")),
-		Play:       key.NewBinding(key.WithKeys("enter")),
-		Pause:      key.NewBinding(key.WithKeys("space")),
-		SwitchView: key.NewBinding(key.WithKeys("tab")),
+func (ui *UI) getCurrentList() *tview.List {
+	if ui.currentView == StationView {
+		return ui.stationList
 	}
+	return ui.fileList
 }
 
-func New(p *player.Player, cfg *config.Config) Model {
-	m := Model{
-		player:    p,
-		stations:  cfg.Stations,
-		musicDirs: cfg.MusicDirs,
-		keys:      defaultKeys(),
-	}
-	m.scanLocalFiles()
-	return m
-}
+func (ui *UI) populateStations() {
+	ui.stationList.Clear()
+	for i, station := range ui.config.Stations {
+		tags := ""
+		if len(station.Tags) > 0 {
+			tags = fmt.Sprintf(" [gray](%s)", strings.Join(station.Tags, ", "))
+		}
 
-func (m *Model) scanLocalFiles() {
-	m.localFiles = []string{}
-	for _, dir := range m.musicDirs {
-		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() {
-				return nil
-			}
-			if audioExts[strings.ToLower(filepath.Ext(path))] {
-				m.localFiles = append(m.localFiles, path)
-			}
-			return nil
+		text := fmt.Sprintf("%s%s", station.Name, tags)
+		ui.stationList.AddItem(text, station.URL, 0, func() {
+			ui.playStation(i)
 		})
 	}
 }
 
-func (m Model) Init() tea.Cmd {
-	return waitForState(m.player.StateChanges)
-}
+func (ui *UI) populateFiles() {
+	ui.fileList.Clear()
+	for _, file := range ui.musicFiles {
+		name := strings.TrimSuffix(file.Name, filepath.Ext(file.Name))
+		dir := filepath.Base(file.Dir)
+		text := fmt.Sprintf("%s [gray](%s)", name, dir)
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
-
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
-		m.logView = viewport.New(m.width, m.height/3)
-		m.logView.SetContent(strings.Join(m.logs, "\n"))
-		m.ready = true
-
-	case tea.KeyMsg:
-		switch {
-		case key.Matches(msg, m.keys.Quit):
-			return m, tea.Quit
-		case key.Matches(msg, m.keys.SwitchView):
-			m.mode = (m.mode + 1) % 2
-			m.cursor = 0
-		case key.Matches(msg, m.keys.Up):
-			if m.cursor > 0 {
-				m.cursor--
+		ui.fileList.AddItem(text, file.Path, 0, func() {
+			currentIndex := ui.fileList.GetCurrentItem()
+			if currentIndex >= 0 && currentIndex < len(ui.musicFiles) {
+				ui.playFile(ui.musicFiles[currentIndex].Path)
 			}
-		case key.Matches(msg, m.keys.Down):
-			limit := m.getItemCount() - 1
-			if m.cursor < limit {
-				m.cursor++
+		})
+	}
+}
+
+func (ui *UI) scanMusicFiles() {
+	go func() {
+		files, err := scanner.ScanDirectories(ui.config.MusicDirs)
+		if err != nil {
+			return
+		}
+
+		ui.musicFiles = files
+		ui.app.QueueUpdateDraw(func() {
+			ui.populateFiles()
+		})
+	}()
+}
+
+func (ui *UI) setupKeybinds() {
+	ui.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Rune() {
+		case 'q':
+			ui.app.Stop()
+			return nil
+		case ' ':
+			ui.player.TogglePause()
+			return nil
+		case 's':
+			ui.player.Stop()
+			return nil
+		case '+', '=':
+			state := ui.player.GetState()
+			if state.Volume < 100 {
+				ui.player.SetVolume(state.Volume + 5)
 			}
-		case key.Matches(msg, m.keys.Play):
-			m.playSelected()
-		case key.Matches(msg, m.keys.Pause):
-			m.player.TogglePause()
+			return nil
+		case '-':
+			state := ui.player.GetState()
+			if state.Volume > 0 {
+				ui.player.SetVolume(state.Volume - 5)
+			}
+			return nil
 		}
 
-	case stateMsg:
-		m.playerState = player.State(msg)
-		cmds = append(cmds, waitForState(m.player.StateChanges))
-	}
-
-	if m.ready {
-		var cmd tea.Cmd
-		m.logView, cmd = m.logView.Update(msg)
-		cmds = append(cmds, cmd)
-	}
-
-	return m, tea.Batch(cmds...)
-}
-
-func (m *Model) getItemCount() int {
-	if m.mode == radioView {
-		return len(m.stations)
-	}
-	return len(m.localFiles)
-}
-
-func (m *Model) playSelected() {
-	var path string
-	switch m.mode {
-	case radioView:
-		if m.cursor < len(m.stations) {
-			path = m.stations[m.cursor].URL
+		switch event.Key() {
+		case tcell.KeyTab:
+			ui.switchView()
+			return nil
+		case tcell.KeyEnter:
+			ui.playSelected()
+			return nil
 		}
-	case localFilesView:
-		if m.cursor < len(m.localFiles) {
-			path = m.localFiles[m.cursor]
-		}
-	}
-	if path != "" {
-		m.player.LoadFile(path, "replace")
-	}
+
+		return event
+	})
 }
 
-func (m Model) View() string {
-	if !m.ready {
-		return "Initializing..."
-	}
-
-	header := m.renderHeader()
-	content := m.renderContent()
-	status := m.renderStatus()
-	help := m.renderHelp()
-
-	return lipgloss.JoinVertical(lipgloss.Left,
-		header, content, status, help, m.logView.View())
-}
-
-func (m Model) renderHeader() string {
-	title := "TuneCLI"
-	if m.mode == radioView {
-		title += " - Radio Stations"
+func (ui *UI) switchView() {
+	if ui.currentView == StationView {
+		ui.currentView = FileView
+		ui.layout.RemoveItem(ui.stationList)
+		ui.layout.AddItem(ui.fileList, 0, 1, true)
+		ui.app.SetFocus(ui.fileList)
 	} else {
-		title += " - Local Files"
+		ui.currentView = StationView
+		ui.layout.RemoveItem(ui.fileList)
+		ui.layout.AddItem(ui.stationList, 0, 1, true)
+		ui.app.SetFocus(ui.stationList)
 	}
-	return lipgloss.NewStyle().Bold(true).Render(title) + "\n"
 }
 
-func (m Model) renderContent() string {
-	var items []string
-
-	switch m.mode {
-	case radioView:
-		for i, station := range m.stations {
-			items = append(items, m.renderItem(station.Name, i))
+func (ui *UI) playSelected() {
+	if ui.currentView == StationView {
+		index := ui.stationList.GetCurrentItem()
+		if index >= 0 && index < len(ui.config.Stations) {
+			ui.playStation(index)
 		}
-	case localFilesView:
-		start, end := m.getVisibleRange()
-		for i := start; i < end; i++ {
-			name := filepath.Base(m.localFiles[i])
-			items = append(items, m.renderItem(name, i))
-		}
-	}
-
-	if len(items) == 0 {
-		return "No items found.\n"
-	}
-
-	return strings.Join(items, "")
-}
-
-func (m Model) getVisibleRange() (int, int) {
-	const visibleItems = 20
-	start := m.cursor - visibleItems/2
-	if start < 0 {
-		start = 0
-	}
-	end := start + visibleItems
-	if end > len(m.localFiles) {
-		end = len(m.localFiles)
-		start = end - visibleItems
-		if start < 0 {
-			start = 0
+	} else {
+		index := ui.fileList.GetCurrentItem()
+		if index >= 0 && index < len(ui.musicFiles) {
+			ui.playFile(ui.musicFiles[index].Path)
 		}
 	}
-	return start, end
 }
 
-func (m Model) renderItem(name string, index int) string {
-	cursor := "  "
-	if index == m.cursor {
-		cursor = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("▶ ")
+func (ui *UI) playStation(index int) {
+	if index >= 0 && index < len(ui.config.Stations) {
+		station := ui.config.Stations[index]
+		ui.player.Play(station.URL)
 	}
-
-	style := lipgloss.NewStyle()
-
-	isCurrentlyPlaying := false
-	if m.playerState.IsPlaying && m.playerState.Title != "" {
-		switch m.mode {
-		case radioView:
-			if index < len(m.stations) {
-				isCurrentlyPlaying = strings.Contains(m.playerState.Title, m.stations[index].Name) ||
-					strings.Contains(m.stations[index].URL, m.playerState.Title)
-			}
-		case localFilesView:
-			if index < len(m.localFiles) {
-				isCurrentlyPlaying = strings.Contains(m.playerState.Title, filepath.Base(m.localFiles[index])) ||
-					strings.Contains(m.localFiles[index], m.playerState.Title)
-			}
-		}
-	}
-
-	if isCurrentlyPlaying {
-		style = style.Foreground(lipgloss.Color("70"))
-		name += " [♪ Playing]"
-	}
-
-	return cursor + style.Render(name) + "\n"
 }
 
-func (m Model) renderStatus() string {
-	if m.playerState.Title == "" {
-		return "\nStatus: Stopped\n"
-	}
-
-	status := "Paused"
-	statusColor := lipgloss.Color("208")
-	if m.playerState.IsPlaying {
-		status = "Playing"
-		statusColor = lipgloss.Color("70")
-	}
-
-	statusStyle := lipgloss.NewStyle().Foreground(statusColor).Bold(true)
-	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
-
-	return fmt.Sprintf("\n%s: %s | Volume: %d%%\n",
-		statusStyle.Render(status),
-		titleStyle.Render(m.playerState.Title),
-		m.playerState.Volume)
+func (ui *UI) playFile(path string) {
+	ui.player.Play(path)
 }
 
-func (m Model) renderHelp() string {
-	help := "Controls: ↑/↓ navigate | Enter play | Space pause/resume | Tab switch view | q quit"
-	return lipgloss.NewStyle().Faint(true).Render(help) + "\n"
+func (ui *UI) handleStateUpdates() {
+	for state := range ui.stateChannel {
+		ui.app.QueueUpdateDraw(func() {
+			ui.updateStatusBar()
+			ui.updateControlBar()
+		})
+		_ = state
+	}
 }
 
-func waitForState(ch chan player.State) tea.Cmd {
-	return func() tea.Msg {
-		return stateMsg(<-ch)
+func (ui *UI) updateStatusBar() {
+	state := ui.player.GetState()
+
+	status := "Stopped"
+	if state.IsPlaying {
+		status = "[green]Playing"
+	} else if state.Title != "" {
+		status = "[yellow]Paused"
 	}
+
+	title := state.Title
+	if title == "" {
+		title = "No media"
+	}
+
+	position := formatTime(state.Position)
+	duration := formatTime(state.Duration)
+
+	statusText := fmt.Sprintf("%s: %s\nVolume: %d%% | %s / %s",
+		status, title, state.Volume, position, duration)
+
+	ui.statusBar.SetText(statusText)
+}
+
+func (ui *UI) updateControlBar() {
+	viewName := "Stations"
+	if ui.currentView == FileView {
+		viewName = "Files"
+	}
+
+	controls := fmt.Sprintf("Tab: Switch (%s) | Enter: Play | Space: Pause | S: Stop | +/-: Volume | Q: Quit",
+		viewName)
+
+	ui.controlBar.SetText(controls)
+}
+
+func formatTime(seconds float64) string {
+	if seconds <= 0 {
+		return "00:00"
+	}
+
+	duration := time.Duration(seconds) * time.Second
+	minutes := int(duration.Minutes())
+	secs := int(duration.Seconds()) % 60
+
+	return fmt.Sprintf("%02d:%02d", minutes, secs)
+}
+
+func (ui *UI) Run() error {
+	return ui.app.SetRoot(ui.layout, true).Run()
+}
+
+func (ui *UI) Stop() {
+	ui.app.Stop()
 }

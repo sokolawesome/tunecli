@@ -9,147 +9,73 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	AppName    = "tunecli"
-	ConfigFile = "config.yml"
-)
-
 type Config struct {
-	MusicDirs []string       `yaml:"music_dirs"`
-	Stations  []RadioStation `yaml:"stations"`
-	Keybinds  Keybinds       `yaml:"keybinds"`
-	Theme     Theme          `yaml:"theme"`
-	Player    Player         `yaml:"player"`
+	MusicDirs []string `yaml:"music_dirs"`
 }
 
-type RadioStation struct {
-	Name string   `yaml:"name"`
-	URL  string   `yaml:"url"`
-	Tags []string `yaml:"tags,omitempty"`
-}
-
-type Keybinds struct {
-	PlayPause  string `yaml:"play_pause"`
-	Stop       string `yaml:"stop"`
-	Next       string `yaml:"next"`
-	Previous   string `yaml:"previous"`
-	VolumeUp   string `yaml:"volume_up"`
-	VolumeDown string `yaml:"volume_down"`
-	Quit       string `yaml:"quit"`
-	Switch     string `yaml:"switch"`
-}
-
-type Theme struct {
-	PrimaryColor   string `yaml:"primary_color"`
-	SecondaryColor string `yaml:"secondary_color"`
-	PlayingColor   string `yaml:"playing_color"`
-	BorderColor    string `yaml:"border_color"`
-}
-
-type Player struct {
-	SocketPath string `yaml:"socket_path"`
-	Volume     int    `yaml:"default_volume"`
-}
-
-func Load() (*Config, error) {
-	configPath, err := getConfigPath()
+func LoadConfig() (*Config, error) {
+	cfgPath, err := os.UserConfigDir()
 	if err != nil {
-		return nil, fmt.Errorf("get config path: %w", err)
+		return nil, fmt.Errorf("failed to load user config directory: %s", err)
 	}
 
-	if err := ensureConfigDir(filepath.Dir(configPath)); err != nil {
-		return nil, fmt.Errorf("ensure config dir: %w", err)
-	}
+	cfgPath = filepath.Join(cfgPath + "/tunecli/config.yaml")
 
-	var cfg Config
-
-	if err := loadConfigFile(configPath, &cfg); err != nil {
+	_, err = os.Stat(cfgPath)
+	if err != nil {
 		if os.IsNotExist(err) {
-			if err := saveConfig(configPath, &cfg); err != nil {
-				return nil, fmt.Errorf("save default config: %w", err)
+			cfg, err := saveDefaultConfig(cfgPath)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create default config: %s", err)
 			}
-		} else {
-			return nil, fmt.Errorf("load config: %w", err)
+			return cfg, nil
 		}
+		return nil, fmt.Errorf("failed to load config file: %s", err)
 	}
 
-	if err := cfg.validate(); err != nil {
-		return nil, fmt.Errorf("validate config: %w", err)
-	}
-
-	return &cfg, nil
-}
-
-func (c *Config) validate() error {
-	if len(c.MusicDirs) == 0 {
-		return fmt.Errorf("at least one music directory required")
-	}
-
-	for _, dir := range c.MusicDirs {
-		if strings.TrimSpace(dir) == "" {
-			return fmt.Errorf("empty music directory")
-		}
-	}
-
-	if len(c.Stations) == 0 {
-		return fmt.Errorf("at least one radio station required")
-	}
-
-	for i, station := range c.Stations {
-		if strings.TrimSpace(station.Name) == "" {
-			return fmt.Errorf("station %d: name required", i)
-		}
-		if strings.TrimSpace(station.URL) == "" {
-			return fmt.Errorf("station %d: URL required", i)
-		}
-	}
-
-	if c.Player.Volume < 0 || c.Player.Volume > 100 {
-		return fmt.Errorf("volume must be between 0 and 100")
-	}
-
-	return nil
-}
-
-func getConfigPath() (string, error) {
-	configHome, err := os.UserConfigDir()
+	cfg, err := os.ReadFile(cfgPath)
 	if err != nil {
-		return "", fmt.Errorf("get user config dir: %w", err)
+		return nil, fmt.Errorf("failed to read config file: %s", err)
 	}
-	return filepath.Join(configHome, AppName, ConfigFile), nil
-}
 
-func ensureConfigDir(path string) error {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := os.MkdirAll(path, 0755); err != nil {
-			return fmt.Errorf("create config dir: %w", err)
+	var config Config
+	err = yaml.Unmarshal(cfg, &config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %s", err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user home directory: %s", err)
+	}
+
+	for i, dir := range config.MusicDirs {
+		if strings.HasPrefix(dir, "~/") {
+			config.MusicDirs[i] = filepath.Join(home, dir[2:])
 		}
 	}
-	return nil
+
+	return &config, nil
 }
 
-func loadConfigFile(path string, cfg *Config) error {
-	data, err := os.ReadFile(path)
+func saveDefaultConfig(cfgPath string) (*Config, error) {
+	config := &Config{
+		MusicDirs: []string{"~/Music"},
+	}
+
+	data, err := yaml.Marshal(config)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("failed to marshal config: %s", err)
 	}
 
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse yaml: %w", err)
+	if err = os.MkdirAll(cfgPath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create config directory: %s", err)
 	}
 
-	return nil
-}
-
-func saveConfig(path string, cfg *Config) error {
-	data, err := yaml.Marshal(cfg)
+	err = os.WriteFile(cfgPath, data, 0644)
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return nil, fmt.Errorf("failed to write config file: %s", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
-
-	return nil
+	return config, nil
 }

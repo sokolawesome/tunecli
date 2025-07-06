@@ -3,5 +3,8 @@ tunecli
 
 !*/
 
+.zed
+.vscode
+
 # OS-specific files
 .DS_Store

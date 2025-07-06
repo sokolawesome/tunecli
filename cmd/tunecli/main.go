@@ -1,52 +1,34 @@
 package main
 
 import (
-	"fmt"
 	"log"
-	"os"
-	"os/signal"
-	"syscall"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sokolawesome/tunecli/internal/config"
 	"github.com/sokolawesome/tunecli/internal/player"
 	"github.com/sokolawesome/tunecli/internal/ui"
 )
 
 func main() {
-	if err := run(); err != nil {
-		log.Fatalf("Error: %v", err)
-	}
-}
-
-func run() error {
-	cfg, err := config.Load()
+	cfg, err := config.LoadConfig()
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		log.Fatalf("failed to load config: %s", err)
 	}
 
-	p, err := player.New(cfg.Player.SocketPath)
+	player, err := player.NewPlayer()
 	if err != nil {
-		return fmt.Errorf("create player: %w", err)
+		log.Fatalf("failed to create player: %s", err)
 	}
-	defer p.Shutdown()
+	defer player.Close()
 
-	if err := p.SetVolume(cfg.Player.Volume); err != nil {
-		log.Printf("Warning: failed to set initial volume: %v", err)
-	}
-
-	app := ui.New(cfg, p)
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		app.Stop()
-	}()
-
-	if err := app.Run(); err != nil {
-		return fmt.Errorf("run UI: %w", err)
+	model, err := ui.NewModel(player, cfg.MusicDirs)
+	if err != nil {
+		log.Fatalf("failed to create model: %s", err)
 	}
 
-	return nil
+	program := tea.NewProgram(model)
+
+	if _, err := program.Run(); err != nil {
+		log.Fatalf("failed to run tui: %s", err)
+	}
 }

@@ -68,7 +68,7 @@ func saveDefaultConfig(cfgPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to marshal config: %s", err)
 	}
 
-	if err = os.MkdirAll(cfgPath, 0755); err != nil {
+	if err = os.MkdirAll(filepath.Dir(cfgPath), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create config directory: %s", err)
 	}
 

@@ -39,14 +39,13 @@ func NewPlayer() (*Player, error) {
 	}, nil
 }
 
-func (player *Player) LoadFile(path string) error {
-	command := map[string]any{"command": []string{"loadfile", path, "replace"}}
-	jsonCommand, err := json.Marshal(command)
+func (player *Player) sendCommand(command map[string]any) error {
+	json, err := json.Marshal(command)
 	if err != nil {
 		return fmt.Errorf("failed to marshal mpv command: %s", err)
 	}
 
-	_, err = player.Conn.Write(append(jsonCommand, '\n'))
+	_, err = player.Conn.Write(append(json, '\n'))
 	if err != nil {
 		return fmt.Errorf("failed to write to connection: %s", err)
 	}
@@ -54,11 +53,23 @@ func (player *Player) LoadFile(path string) error {
 	return nil
 }
 
+func (player *Player) LoadFile(path string) error {
+	command := map[string]any{"command": []string{"loadfile", path, "replace"}}
+
+	return player.sendCommand(command)
+}
+
+func (player *Player) TogglePause() error {
+	command := map[string]any{"command": []string{"cycle", "pause"}}
+
+	return player.sendCommand(command)
+}
+
 func (player *Player) Close() {
 	if err := player.Conn.Close(); err != nil {
-		log.Printf("error closing connection: %s", err)
+		log.Printf("failed to close connection: %s", err)
 	}
 	if err := player.cmd.Process.Kill(); err != nil {
-		log.Printf("error killing mpv process: %s", err)
+		log.Printf("failed to kill mpv process: %s", err)
 	}
 }

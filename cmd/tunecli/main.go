@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	cfg, err := config.LoadConfig()
+	config, err := config.LoadConfig()
 	if err != nil {
 		log.Fatalf("error: %s", err)
 	}
@@ -30,7 +30,7 @@ func main() {
 	}
 	defer server.Close()
 
-	model, err := ui.NewModel(player, cfg.MusicDirs, cmdChan, server)
+	model, err := ui.NewModel(player, config, cmdChan, server)
 	if err != nil {
 		log.Fatalf("error: %s", err)
 	}

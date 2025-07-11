@@ -1,6 +1,4 @@
-# List available tasks
-list:
-    @just --list
+import "~/.config/justfile/common.just"
 
 # Build the application binary
 build:

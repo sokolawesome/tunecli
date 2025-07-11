@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/sokolawesome/tunecli/internal/config"
 	"github.com/sokolawesome/tunecli/internal/mpris"
 	"github.com/sokolawesome/tunecli/internal/player"
 )
@@ -21,21 +22,30 @@ type Model struct {
 	cursor      int
 	player      *player.Player
 	musicDirs   []string
+	stations    []config.Stations
 	cmdChan     <-chan string
 	mprisServer *mpris.MprisServer
 	isPlaying   bool
+	currentView CurrentView
 }
+
+type CurrentView uint8
+
+const (
+	Files CurrentView = iota
+	Radios
+)
 
 type MprisCommand string
 
-func NewModel(player *player.Player, musicDirs []string, cmdChan <-chan string, mprisServer *mpris.MprisServer) (*Model, error) {
-	if len(musicDirs) == 0 {
+func NewModel(player *player.Player, config *config.Config, cmdChan <-chan string, mprisServer *mpris.MprisServer) (*Model, error) {
+	if len(config.MusicDirs) == 0 {
 		return nil, fmt.Errorf("no music dirs provied")
 	}
 
 	var songs []string
 
-	for _, dir := range musicDirs {
+	for _, dir := range config.MusicDirs {
 		files, err := os.ReadDir(dir)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read directory: %s", err)
@@ -53,10 +63,12 @@ func NewModel(player *player.Player, musicDirs []string, cmdChan <-chan string, 
 	return &Model{
 		songs:       songs,
 		player:      player,
-		musicDirs:   musicDirs,
+		musicDirs:   config.MusicDirs,
+		stations:    config.Stations,
 		cmdChan:     cmdChan,
 		mprisServer: mprisServer,
 		isPlaying:   false,
+		currentView: Files,
 	}, nil
 }
 
@@ -89,18 +101,49 @@ func (model *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return model, tea.Quit
+
+		case "tab":
+			switch model.currentView {
+			case Files:
+				model.currentView = Radios
+			case Radios:
+				model.currentView = Files
+			}
+
+			model.cursor = 0
+
 		case "up", "k":
 			model.cursor--
+
 			if model.cursor < 0 {
-				model.cursor = len(model.songs) - 1
+				if model.currentView == Radios {
+					model.cursor = len(model.stations) - 1
+				} else {
+					model.cursor = len(model.songs) - 1
+				}
 			}
+
 		case "down", "j":
 			model.cursor++
-			if model.cursor >= len(model.songs) {
+
+			var boundary int
+			if model.currentView == Radios {
+				boundary = len(model.stations)
+			} else {
+				boundary = len(model.songs)
+			}
+			if model.cursor >= boundary {
 				model.cursor = 0
 			}
+
 		case "enter":
-			model.player.LoadFile(model.songs[model.cursor])
+			switch model.currentView {
+			case Files:
+				model.player.LoadFile(model.songs[model.cursor])
+			case Radios:
+				model.player.LoadFile(model.stations[model.cursor].Url)
+			}
+
 			model.mprisServer.SetPlaybackStatus("Playing")
 			model.isPlaying = true
 		}
@@ -111,15 +154,33 @@ func (model *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (model *Model) View() string {
 	var builder strings.Builder
-	for i, song := range model.songs {
-		song = filepath.Base(song)
-		if i == model.cursor {
-			builder.WriteString(selectedItemStyle.Render("> " + song))
-		} else {
-			builder.WriteString("  " + song)
+
+	if model.currentView == Files {
+		for i, song := range model.songs {
+			song = filepath.Base(song)
+			if i == model.cursor {
+				builder.WriteString(selectedItemStyle.Render("> " + song))
+			} else {
+				builder.WriteString("  " + song)
+			}
+			builder.WriteString("\n")
 		}
-		builder.WriteString("\n")
+
+		builder.WriteString("Quit: <ctrl+c>")
+
+		return builder.String()
+	} else {
+		for i, station := range model.stations {
+			if i == model.cursor {
+				builder.WriteString(selectedItemStyle.Render("> " + station.Name))
+			} else {
+				builder.WriteString("  " + station.Name)
+			}
+			builder.WriteString("\n")
+		}
+
+		builder.WriteString("Quit: <ctrl+c>")
+
+		return builder.String()
 	}
-	builder.WriteString("Quit: <ctrl+c>")
-	return builder.String()
 }

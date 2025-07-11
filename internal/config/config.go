@@ -10,7 +10,13 @@ import (
 )
 
 type Config struct {
-	MusicDirs []string `yaml:"music_dirs"`
+	MusicDirs []string   `yaml:"music_dirs"`
+	Stations  []Stations `yaml:"stations"`
+}
+
+type Stations struct {
+	Name string `yaml:"name"`
+	Url  string `yaml:"url"`
 }
 
 func LoadConfig() (*Config, error) {
@@ -61,6 +67,15 @@ func LoadConfig() (*Config, error) {
 func saveDefaultConfig(cfgPath string) (*Config, error) {
 	config := &Config{
 		MusicDirs: []string{"~/Music"},
+		Stations: []Stations{
+			{
+				Name: "Record Lo-Fi",
+				Url:  "https://radiorecord.hostingradio.ru/lofi96.aacp",
+			}, {
+				Name: "Record Synthwave",
+				Url:  "https://radiorecord.hostingradio.ru/synth96.aacp",
+			},
+		},
 	}
 
 	data, err := yaml.Marshal(config)

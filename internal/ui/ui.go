@@ -13,9 +13,13 @@ import (
 	"github.com/sokolawesome/tunecli/internal/player"
 )
 
-var (
-	selectedItemStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
-)
+var selectedItemStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("205")).
+	Bold(true)
+
+var style = lipgloss.NewStyle().
+	BorderStyle(lipgloss.NormalBorder()).
+	BorderForeground(lipgloss.Color("60"))
 
 type Model struct {
 	songs       []string
@@ -25,9 +29,17 @@ type Model struct {
 	stations    []config.Stations
 	cmdChan     <-chan string
 	mprisServer *mpris.MprisServer
-	isPlaying   bool
+	isPlaying   CurrentStatus
 	currentView CurrentView
 }
+
+type CurrentStatus uint8
+
+const (
+	Stopped CurrentStatus = iota
+	Playing
+	Paused
+)
 
 type CurrentView uint8
 
@@ -38,7 +50,12 @@ const (
 
 type MprisCommand string
 
-func NewModel(player *player.Player, config *config.Config, cmdChan <-chan string, mprisServer *mpris.MprisServer) (*Model, error) {
+func NewModel(
+	player *player.Player,
+	config *config.Config,
+	cmdChan <-chan string,
+	mprisServer *mpris.MprisServer,
+) (*Model, error) {
 	if len(config.MusicDirs) == 0 {
 		return nil, fmt.Errorf("no music dirs provied")
 	}
@@ -67,13 +84,13 @@ func NewModel(player *player.Player, config *config.Config, cmdChan <-chan strin
 		stations:    config.Stations,
 		cmdChan:     cmdChan,
 		mprisServer: mprisServer,
-		isPlaying:   false,
+		isPlaying:   Stopped,
 		currentView: Files,
 	}, nil
 }
 
 func (model *Model) Init() tea.Cmd {
-	return waitForMprisCommand(model.cmdChan)
+	return tea.Batch(waitForMprisCommand(model.cmdChan), tea.SetWindowTitle("tunecli"))
 }
 
 func waitForMprisCommand(cmdChan <-chan string) tea.Cmd {
@@ -85,17 +102,21 @@ func waitForMprisCommand(cmdChan <-chan string) tea.Cmd {
 func (model *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case MprisCommand:
-		if msg == "toggle_pause" {
+		if msg == "toggle_pause" && model.isPlaying != Stopped {
 			if err := model.player.TogglePause(); err != nil {
 				fmt.Println("Failed to toggle pause:", err)
 			}
-			if model.isPlaying {
+
+			switch model.isPlaying {
+			case Playing:
 				model.mprisServer.SetPlaybackStatus("Paused")
-			} else {
+				model.isPlaying = Paused
+			case Paused:
 				model.mprisServer.SetPlaybackStatus("Playing")
+				model.isPlaying = Playing
 			}
-			model.isPlaying = !model.isPlaying
 		}
+
 		return model, waitForMprisCommand(model.cmdChan)
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -143,18 +164,23 @@ func (model *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				model.player.LoadFile(model.songs[model.cursor])
 			}
 
+			if model.isPlaying == Paused {
+				model.player.TogglePause()
+			}
+
 			model.mprisServer.SetPlaybackStatus("Playing")
-			model.isPlaying = true
+			model.isPlaying = Playing
 
 		case " ":
 			model.player.TogglePause()
-			if model.isPlaying {
+			switch model.isPlaying {
+			case Playing:
 				model.mprisServer.SetPlaybackStatus("Paused")
-			} else {
+				model.isPlaying = Paused
+			case Paused:
 				model.mprisServer.SetPlaybackStatus("Playing")
+				model.isPlaying = Playing
 			}
-
-			model.isPlaying = !model.isPlaying
 		}
 	}
 
@@ -174,10 +200,6 @@ func (model *Model) View() string {
 			}
 			builder.WriteString("\n")
 		}
-
-		builder.WriteString("Quit: <ctrl+c>")
-
-		return builder.String()
 	} else {
 		for i, station := range model.stations {
 			if i == model.cursor {
@@ -187,9 +209,19 @@ func (model *Model) View() string {
 			}
 			builder.WriteString("\n")
 		}
-
-		builder.WriteString("Quit: <ctrl+c>")
-
-		return builder.String()
 	}
+
+	var status string
+	switch model.isPlaying {
+	case Playing:
+		status = "Playing"
+	case Paused:
+		status = "Paused"
+	case Stopped:
+		status = "Stopped"
+	}
+
+	view := lipgloss.JoinVertical(lipgloss.Left, status, style.Render(builder.String()), "Quit: <ctrl+c>")
+
+	return style.Render(view)
 }

@@ -35,7 +35,7 @@ func main() {
 		log.Fatalf("error: %s", err)
 	}
 
-	program := tea.NewProgram(model)
+	program := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := program.Run(); err != nil {
 		log.Fatalf("error: %s", err)

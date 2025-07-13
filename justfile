@@ -13,7 +13,7 @@ run: build
 # Format all Go source files
 fmt:
     @echo "Formatting code..."
-    @go fmt ./...
+    @golangci-lint fmt ./...
 
 # Tidy the mod file
 tidy:

@@ -137,15 +137,24 @@ func (model *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "enter":
-			switch model.currentView {
-			case Files:
-				model.player.LoadFile(model.songs[model.cursor])
-			case Radios:
+			if model.currentView == Radios {
 				model.player.LoadFile(model.stations[model.cursor].Url)
+			} else {
+				model.player.LoadFile(model.songs[model.cursor])
 			}
 
 			model.mprisServer.SetPlaybackStatus("Playing")
 			model.isPlaying = true
+
+		case " ":
+			model.player.TogglePause()
+			if model.isPlaying {
+				model.mprisServer.SetPlaybackStatus("Paused")
+			} else {
+				model.mprisServer.SetPlaybackStatus("Playing")
+			}
+
+			model.isPlaying = !model.isPlaying
 		}
 	}
 

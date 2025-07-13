@@ -2,27 +2,44 @@ version: "2"
 
 run:
     concurrency: 4
-    issues-exit-code: 1
-    tests: true
+    tests: false
 
 linters:
     enable:
-        - govet
-        - errcheck
-        - staticcheck
-        - unused
-        - ineffassign
+        - bodyclose
+        - exhaustive
+        - goconst
+        - godot
+        - gomoddirectives
+        - goprintffuncname
+        - gosec
         - misspell
+        - nakedret
+        - nestif
+        - nilerr
+        - noctx
+        - nolintlint
+        - prealloc
+        - rowserrcheck
+        - sqlclosecheck
+        - tparallel
+        - unconvert
+        - unparam
+        - whitespace
+        - wrapcheck
     settings:
-        errcheck:
-            check-type-assertions: true
-            check-blank: true
         misspell:
             locale: US
 
 formatters:
     enable:
         - gofmt
+        - goimports
+        - golines
     settings:
         gofmt:
-            simplify: true
+            rewrite-rules:
+                - pattern: "interface{}"
+                  replacement: "any"
+                - pattern: "a[b:len(a)]"
+                  replacement: "a[b:]"

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,8 @@ type Model struct {
 	mprisServer *mpris.MprisServer
 	isPlaying   CurrentStatus
 	currentView CurrentView
+	logs        []string
+	logChan     <-chan string
 }
 
 type CurrentStatus uint8
@@ -49,11 +52,13 @@ const (
 )
 
 type MprisCommand string
+type LogMessage string
 
 func NewModel(
 	player *player.Player,
 	config *config.Config,
 	cmdChan <-chan string,
+	logChan <-chan string,
 	mprisServer *mpris.MprisServer,
 ) (*Model, error) {
 	if len(config.MusicDirs) == 0 {
@@ -83,6 +88,7 @@ func NewModel(
 		musicDirs:   config.MusicDirs,
 		stations:    config.Stations,
 		cmdChan:     cmdChan,
+		logChan:     logChan,
 		mprisServer: mprisServer,
 		isPlaying:   Stopped,
 		currentView: Files,
@@ -90,7 +96,7 @@ func NewModel(
 }
 
 func (model *Model) Init() tea.Cmd {
-	return tea.Batch(waitForMprisCommand(model.cmdChan), tea.SetWindowTitle("tunecli"))
+	return tea.Batch(waitForMprisCommand(model.cmdChan), waitForLogMessage(model.logChan), tea.SetWindowTitle("tunecli"))
 }
 
 func waitForMprisCommand(cmdChan <-chan string) tea.Cmd {
@@ -99,12 +105,21 @@ func waitForMprisCommand(cmdChan <-chan string) tea.Cmd {
 	}
 }
 
+func waitForLogMessage(logChan <-chan string) tea.Cmd {
+	return func() tea.Msg {
+		return LogMessage(<-logChan)
+	}
+}
+
 func (model *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case LogMessage:
+		model.logs = append(model.logs, string(msg))
+		return model, waitForLogMessage(model.logChan)
 	case MprisCommand:
 		if msg == "toggle_pause" && model.isPlaying != Stopped {
 			if err := model.player.TogglePause(); err != nil {
-				fmt.Println("Failed to toggle pause:", err)
+				log.Printf("Failed to toggle pause: %v", err)
 			}
 
 			switch model.isPlaying {
@@ -221,7 +236,7 @@ func (model *Model) View() string {
 		status = "Stopped"
 	}
 
-	view := lipgloss.JoinVertical(lipgloss.Left, status, style.Render(builder.String()), "Quit: <ctrl+c>")
+	view := lipgloss.JoinVertical(lipgloss.Left, status, lipgloss.JoinHorizontal(lipgloss.Left, style.Render(builder.String()), style.Render(strings.Join(model.logs, "\n"))), "Quit: <ctrl+c>")
 
 	return style.Render(view)
 }

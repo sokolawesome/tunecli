@@ -18,11 +18,16 @@ var selectedItemStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("205")).
 	Bold(true)
 
-var style = lipgloss.NewStyle().
-	BorderStyle(lipgloss.NormalBorder()).
-	BorderForeground(lipgloss.Color("60"))
+var paneStyle = lipgloss.NewStyle().
+	Border(lipgloss.NormalBorder()).
+	BorderForeground(lipgloss.Color("80"))
+
+const MaxLogHistory = 5
+const footerHeight = 10
 
 type Model struct {
+	width       int
+	height      int
 	songs       []string
 	cursor      int
 	player      *player.Player
@@ -113,26 +118,6 @@ func waitForLogMessage(logChan <-chan string) tea.Cmd {
 
 func (model *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case LogMessage:
-		model.logs = append(model.logs, string(msg))
-		return model, waitForLogMessage(model.logChan)
-	case MprisCommand:
-		if msg == "toggle_pause" && model.isPlaying != Stopped {
-			if err := model.player.TogglePause(); err != nil {
-				log.Printf("Failed to toggle pause: %v", err)
-			}
-
-			switch model.isPlaying {
-			case Playing:
-				model.mprisServer.SetPlaybackStatus("Paused")
-				model.isPlaying = Paused
-			case Paused:
-				model.mprisServer.SetPlaybackStatus("Playing")
-				model.isPlaying = Playing
-			}
-		}
-
-		return model, waitForMprisCommand(model.cmdChan)
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
@@ -197,12 +182,82 @@ func (model *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				model.isPlaying = Playing
 			}
 		}
+	case LogMessage:
+		model.logs = append(model.logs, string(msg))
+
+		if len(model.logs) > MaxLogHistory {
+			model.logs = model.logs[1:]
+		}
+
+		return model, waitForLogMessage(model.logChan)
+
+	case MprisCommand:
+		if msg == "toggle_pause" && model.isPlaying != Stopped {
+			if err := model.player.TogglePause(); err != nil {
+				log.Printf("Failed to toggle pause: %v", err)
+			}
+
+			switch model.isPlaying {
+			case Playing:
+				model.mprisServer.SetPlaybackStatus("Paused")
+				model.isPlaying = Paused
+			case Paused:
+				model.mprisServer.SetPlaybackStatus("Playing")
+				model.isPlaying = Playing
+			}
+		}
+
+		return model, waitForMprisCommand(model.cmdChan)
+
+	case tea.WindowSizeMsg:
+		model.width = msg.Width
+		model.height = msg.Height
+
+		return model, nil
 	}
 
 	return model, nil
 }
 
 func (model *Model) View() string {
+	if model.width == 0 {
+		return "Initializing..."
+	}
+	mainContentHeight := model.height - footerHeight
+
+	leftPane := paneStyle.
+		Height(mainContentHeight).
+		Width(model.width/2 - 3).
+		Render(model.renderListPane())
+
+	var status string
+	switch model.isPlaying {
+	case Playing:
+		status = "Playing"
+	case Paused:
+		status = "Paused"
+	case Stopped:
+		status = "Stopped"
+	}
+
+	rightPane := paneStyle.
+		Height(mainContentHeight).
+		Width(model.width / 2).
+		Render(status)
+
+	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
+
+	keybinds := "Quit: <ctrl+c> | Switch View: tab | Play/Pause: space | Select song/station: enter"
+	logs := strings.Join(model.logs, "\n")
+
+	footerContent := lipgloss.NewStyle().
+		PaddingTop(1).
+		Render(lipgloss.JoinVertical(lipgloss.Center, keybinds, "\n", logs))
+
+	return lipgloss.JoinVertical(lipgloss.Center, mainContent, footerContent)
+}
+
+func (model *Model) renderListPane() string {
 	var builder strings.Builder
 
 	if model.currentView == Files {
@@ -226,17 +281,5 @@ func (model *Model) View() string {
 		}
 	}
 
-	var status string
-	switch model.isPlaying {
-	case Playing:
-		status = "Playing"
-	case Paused:
-		status = "Paused"
-	case Stopped:
-		status = "Stopped"
-	}
-
-	view := lipgloss.JoinVertical(lipgloss.Left, status, lipgloss.JoinHorizontal(lipgloss.Left, style.Render(builder.String()), style.Render(strings.Join(model.logs, "\n"))), "Quit: <ctrl+c>")
-
-	return style.Render(view)
+	return builder.String()
 }

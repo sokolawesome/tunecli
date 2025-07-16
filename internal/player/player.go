@@ -55,12 +55,14 @@ func (player *Player) sendCommand(command map[string]any) error {
 
 func (player *Player) LoadFile(path string) error {
 	command := map[string]any{"command": []string{"loadfile", path, "replace"}}
+	log.Print("Command sent: loadfile")
 
 	return player.sendCommand(command)
 }
 
 func (player *Player) TogglePause() error {
 	command := map[string]any{"command": []string{"cycle", "pause"}}
+	log.Print("Command sent: play/pause")
 
 	return player.sendCommand(command)
 }

@@ -1,5 +1,7 @@
 package logview
 
+import "strings"
+
 type LogWriter struct {
 	LogChan chan<- string
 }
@@ -11,7 +13,7 @@ func NewLogWriter(logChan chan<- string) *LogWriter {
 }
 
 func (lw *LogWriter) Write(p []byte) (n int, err error) {
-	msg := string(p)
+	msg := strings.TrimRight(string(p), "\n")
 	lw.LogChan <- msg
 	return len(p), nil
 }
